@@ -65,7 +65,7 @@ export default function Controls({ options, onChange, disabled }: Props) {
           {(
             [
               ["histogram", "Histogram"],
-              ["kmeans", "k-means"],
+              ["mediancut", "Median cut"],
             ] as [Method, string][]
           ).map(([value, label]) => (
             <button
@@ -82,7 +82,7 @@ export default function Controls({ options, onChange, disabled }: Props) {
         <p className="panel-note">
           {options.method === "histogram"
             ? "Rounds colours onto a fixed grid and counts the fullest cell. Fast and exact."
-            : "Finds natural colour groupings rather than using a fixed grid. Seeded, so results repeat."}
+            : "Splits the colours into boxes that fit the image, instead of a fixed grid. No randomness."}
         </p>
       </div>
 

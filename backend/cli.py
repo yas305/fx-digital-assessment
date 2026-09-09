@@ -9,7 +9,7 @@ nothing outside the standard library.
 
 Usage:
     python cli.py photo.jpg
-    python cli.py photo.jpg --top 5 --method kmeans
+    python cli.py photo.jpg --top 5 --method mediancut
     python cli.py product.jpg --ignore-white
     python cli.py photo.jpg --json
 """
@@ -51,12 +51,12 @@ def build_parser() -> argparse.ArgumentParser:
             "Examples:\n"
             "  python cli.py photo.jpg\n"
             "  python cli.py photo.jpg --top 5\n"
-            "  python cli.py logo.png --method kmeans --top 5\n"
+            "  python cli.py logo.png --method mediancut --top 5\n"
             "  python cli.py product.jpg --ignore-white --json\n"
         ),
     )
     parser.add_argument("image", type=Path, help="Path to the image file.")
-    parser.add_argument("--method", choices=["histogram", "kmeans"], default="histogram",
+    parser.add_argument("--method", choices=["histogram", "mediancut"], default="histogram",
                         help="Counting strategy (default: histogram).")
     parser.add_argument("--top", type=int, default=1, metavar="N",
                         help="Return the top N colours instead of just one.")
@@ -110,7 +110,7 @@ def print_report(result: dict, bucket_size: int, show_palette: bool) -> None:
     print("  DETAIL")
     print(f"    method              {result['method']}")
     if stats["iterations"] is not None:
-        print(f"    k-means rounds      {stats['iterations']}")
+        print(f"    cuts made           {stats['iterations']}")
     else:
         print(f"    bucket size         {bucket_size}")
     print(f"    pixels counted      {result['filters']['pixelsCounted']:,} "

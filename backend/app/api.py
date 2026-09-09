@@ -40,10 +40,9 @@ from .dominant import (
     RGB,
     ImageLoadError,
     apply_filters,
-    cluster_colours,
     count_colours,
     load_image,
-    nearest_centre,
+    median_cut,
     quantise_pixel,
     sample_pixels,
 )
@@ -51,7 +50,7 @@ from .samples import SAMPLES, SAMPLES_BY_ID, render_sample
 
 # The two counting strategies. A plain string rather than an enum class --
 # FastAPI validates it just the same and rejects anything else with a 422.
-Method = Literal["histogram", "kmeans"]
+Method = Literal["histogram", "mediancut"]
 
 
 class AnalysisError(ValueError):
@@ -247,9 +246,10 @@ def analyse(
     unique_raw = len(set(image["pixels"]))
 
     iterations = None
-    if method == "kmeans":
-        run = cluster_colours(counted, k=max(top_n, 1))
-        colours, iterations, distinct = run["results"], run["iterations"], len(run["results"])
+    if method == "mediancut":
+        run = median_cut(counted, box_count=max(top_n, 1))
+        colours, distinct = run["results"], len(run["results"])
+        iterations = run["splits"]
     else:
         colours, distinct = count_colours(counted, bucket_size=bucket_size, top_n=top_n)
 
@@ -304,8 +304,8 @@ def analyse(
 #  The algorithm animation
 #
 #  The frontend replays the algorithm's genuine intermediate state rather than
-#  an illustration of it, so this returns real sampled pixels and, for k-means,
-#  the actual position of every centre after every round.
+#  an illustration of it, so this returns real sampled pixels and, for median
+#  cut, the colour of every box after every cut.
 # ===========================================================================
 
 
@@ -316,7 +316,7 @@ def choose_plot_axes(colours: Sequence[RGB]) -> Tuple[int, int]:
     Colour is three-dimensional and a screen is two, so a scatter plot has to
     drop something. Rather than always dropping blue, this picks the two channels
     that vary most in *this* image -- the view most likely to show the groupings
-    k-means is working with.
+    median cut is working with.
     """
     if not colours:
         return 0, 1
@@ -391,58 +391,63 @@ def explain(
     positions = None
     quantised = None
 
-    if method == "kmeans":
-        run = cluster_colours(counted, k=max(top_n, 1))
+    if method == "mediancut":
+        run = median_cut(counted, box_count=max(top_n, 1), record_steps=True)
         ranked, distinct = run["results"], len(run["results"])
 
         axes = choose_plot_axes(sample_colours)
         positions = plot_positions(sample_colours, axes)
 
-        final = run["history"][-1]
-        # A centre's index is arbitrary, but its rank (biggest first) is what the
-        # palette beside the animation is ordered by. Mapping to rank keeps the
-        # two consistent as the centres move about.
-        final_totals = [0] * len(final)
-        for colour, weight in zip(run["colours"], run["weights"]):
-            final_totals[nearest_centre(colour, final)] += weight
+        # A box's position in the list is arbitrary, but its rank (biggest
+        # first) is what the palette beside the animation is ordered by.
+        final = run["steps"][-1]
         rank_of = {
             index: rank
             for rank, index in enumerate(
-                sorted(range(len(final)), key=lambda i: -final_totals[i])
+                sorted(
+                    range(len(final["colours"])),
+                    key=lambda i: -sum(
+                        1 for box in final["lookup"].values() if box == i
+                    ),
+                )
             )
         }
 
-        total_weight = sum(run["weights"]) or 1
-        for step, centres in enumerate(run["history"]):
-            totals = [0] * len(centres)
-            for colour, weight in zip(run["colours"], run["weights"]):
-                totals[nearest_centre(colour, centres)] += weight
+        total_pixels = len(counted) or 1
+        for step_number, step in enumerate(run["steps"]):
+            colours_now = step["colours"]
+            lookup = step["lookup"]
 
-            centre_positions = plot_positions(centres, axes)
+            share_of = [0] * len(colours_now)
+            for colour in counted:
+                box = lookup.get(colour)
+                if box is not None and box < len(share_of):
+                    share_of[box] += 1
+
+            box_positions = plot_positions(colours_now, axes)
             iterations.append(
                 {
-                    "step": step,
-                    # The seeds are chosen, not calculated, so the UI labels that
-                    # first frame differently.
-                    "isSeed": step == 0,
-                    "centres": [
+                    "step": step_number,
+                    # Step 0 is the single starting box, before any cut.
+                    "isFirst": step_number == 0,
+                    "boxes": [
                         {
-                            "rgb": list(centres[index]),
-                            "hex": rgb_to_hex(centres[index]),
-                            "position": centre_positions[index],
+                            "rgb": list(colours_now[index]),
+                            "hex": rgb_to_hex(colours_now[index]),
+                            "position": box_positions[index],
                             "rank": rank_of.get(index, index),
-                            "share": totals[index] / total_weight,
+                            "share": share_of[index] / total_pixels,
                         }
-                        for index in range(len(centres))
+                        for index in range(len(colours_now))
                     ],
                     "assignments": [
-                        nearest_centre(colour, centres) for colour in sample_colours
+                        lookup.get(colour, 0) for colour in sample_colours
                     ],
                 }
             )
 
         bucket_of_pixel = [
-            rank_of.get(nearest_centre(colour, final), -1) for colour in sample_colours
+            rank_of.get(final["lookup"].get(colour, -1), -1) for colour in sample_colours
         ]
     else:
         ranked, distinct = count_colours(counted, bucket_size=bucket_size, top_n=top_n)
@@ -508,7 +513,7 @@ app = FastAPI(
     title="Dominant Colour Finder",
     description=(
         "Finds the most frequent colour in an image, using either a rounded "
-        "histogram or k-means clustering."
+        "histogram or median cut."
     ),
     version="1.0.0",
 )
@@ -683,7 +688,7 @@ async def analyse_upload(
     """
     Analyse an uploaded image and return its dominant colour.
 
-    ``method`` chooses between the rounded histogram and k-means clustering. The
+    ``method`` chooses between the rounded histogram and median cut. The
     rest tune how coarsely colours are grouped, how many to return, and which to
     leave out.
     """
