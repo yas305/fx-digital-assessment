@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Node
+node_modules/
+dist/
+*.local
+
+# Generated sample images (rebuilt on demand by app/samples.py)
+backend/samples/*.png
+
+# Editors / OS
+.DS_Store
+.vscode/
+.idea/

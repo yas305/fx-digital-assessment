@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/main.tsx","./src/types.ts","./src/components/algorithmanimation.tsx","./src/components/controls.tsx","./src/components/distributionchart.tsx","./src/components/dominantcard.tsx","./src/components/palette.tsx","./src/components/statspanel.tsx","./src/components/uploader.tsx","./src/lib/api.ts"],"version":"5.9.3"}

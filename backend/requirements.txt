@@ -1,0 +1,12 @@
+# Web framework + ASGI server
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20   # required by FastAPI for multipart/form-data uploads
+
+# Image decoding. The only heavy dependency, and only used to turn a JPEG or PNG
+# into a list of pixels -- every calculation after that is plain Python.
+pillow==11.1.0
+
+# Dev / test
+pytest==8.3.4
+httpx==0.28.1              # used by FastAPI's TestClient
