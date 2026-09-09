@@ -9,8 +9,8 @@ Two ways of counting are implemented, and they answer different questions:
 
   * The histogram rounds every colour onto a fixed grid and counts the cells.
     "Which single shade appears most often?"
-  * Median cut draws boxes that fit the image, with no fixed grid at all.
-    "If I had to describe this image with a few colours, which few?"
+  * k-means lets groups form where the colours actually cluster, with no grid.
+    "If I had to describe this image with k colours, which k?"
 
 There are no classes in this file, and no NumPy. Colours are plain (red, green,
 blue) tuples, images are plain lists of them, and results are plain dictionaries.
@@ -155,23 +155,6 @@ def load_image(data: bytes, max_dimension: Optional[int] = DEFAULT_MAX_DIMENSION
 # ===========================================================================
 
 
-def distance_squared(first: RGB, second: RGB) -> int:
-    """
-    How far apart two colours are, squared.
-
-    Subtract each channel, square the differences (so negatives become
-    positive), add them up. A small number means the colours look alike.
-
-    The square root is skipped on purpose. This is only ever used to ask "is
-    this closer than that?", and whichever distance is smallest also has the
-    smallest square, so taking the root would be wasted work.
-    """
-    red = first[0] - second[0]
-    green = first[1] - second[1]
-    blue = first[2] - second[2]
-    return red * red + green * green + blue * blue
-
-
 def apply_filters(
     pixels: List[RGB],
     min_saturation: float = 0.0,
@@ -270,7 +253,7 @@ def count_colours(
     """
     Round every colour onto a grid, count the cells, return the fullest.
 
-    Why round at all? There are 256 x 256 x 256 = 16.7 million possible colours.
+    16.7 million possible colours.
     A photograph of a blue sky holds thousands of slightly different blues, which
     a person calls one colour and a computer counts as thousands, each with a
     tally of about one. Meanwhile any small patch of flat colour wins by default.
@@ -286,18 +269,6 @@ def count_colours(
     # Two dictionaries do all the work:
     #   how_many[bucket]        one number: how many pixels are in this cell
     #   channel_totals[bucket]  THREE numbers: [red total, green total, blue total]
-    #
-    # The three totals are kept separately and never added to each other. Red
-    # only ever accumulates into red. At the end each is divided by the count on
-    # its own, giving the average red, average green and average blue -- which
-    # packed back into a tuple is the average colour.
-    #
-    # They accumulate the ORIGINAL, unrounded values, which is what lets the
-    # bucket report a colour genuinely present in the image rather than the grid
-    # corner it was filed under.
-    #
-    # A dictionary is the right tool because looking a bucket up costs the same
-    # whether there are ten buckets or ten thousand.
     how_many: Dict[RGB, int] = {}
     channel_totals: Dict[RGB, List[int]] = {}
 
@@ -311,13 +282,10 @@ def count_colours(
         how_many[bucket] += 1
 
         totals = channel_totals[bucket]
-        totals[0] += pixel[0]      # red   into the red total
-        totals[1] += pixel[1]      # green into the green total
-        totals[2] += pixel[2]      # blue  into the blue total
+        totals[0] += pixel[0]      
+        totals[1] += pixel[1]      
+        totals[2] += pixel[2]      
 
-    # Fullest bucket first. The second half of the sort key only matters for
-    # ties, but without it the winner of a tie would depend on the order the
-    # pixels happened to appear in, and the same image could give two answers.
     ranked = sorted(how_many, key=lambda bucket: (-how_many[bucket], bucket))
 
     total = len(pixels)
@@ -349,209 +317,249 @@ def count_colours(
 
 
 # ===========================================================================
-#  Method two: median cut
+#  Method two: k-means clustering
 # ===========================================================================
 #
-# The histogram's weakness is that its grid lines are decided before anyone
-# looks at the image, so a smoothly shaded object gets sliced across several
-# cells that then compete against each other.
+# Picture ice-cream vans parking in a town:
 #
-# Median cut draws the boundaries to fit the image instead:
+#   1. Park k vans somewhere sensible.
+#   2. Every resident walks to their nearest van.
+#   3. Each van moves to the middle of its own customers.
+#   4. Some residents now find a different van is nearer, so go back to step 2.
 #
-#   1. Put every pixel in one big box.
-#   2. Look at that box: which of red, green or blue is most spread out?
-#   3. Sort the box by that channel and cut it in half at the middle pixel.
-#   4. Find whichever box is now most spread out, and cut that one.
-#   5. Repeat until you have as many boxes as you asked for.
-#   6. Each box's average colour is one of the answers.
+# Repeat until the vans stop moving. The town is colour space, the residents are
+# pixels standing at their own colour, the vans are the cluster centres, and the
+# busiest van is the dominant colour.
 #
-# There is no randomness, nothing repeats until it settles, and the same image
-# always gives the same answer. It is the algorithm behind most "extract a
-# palette from this image" tools.
+# The difference from the histogram is where the boundaries fall. The histogram
+# draws them on a fixed grid decided before anyone looked at the image, so a
+# smoothly shaded object gets sliced into pieces that compete against each other.
+# k-means puts its boundaries wherever colours are sparse, so a shaded object
+# stays in one group.
+
+DEFAULT_SEED = 42
+MAX_ITERATIONS = 40
+
+# Stop once no centre moves further than this in a round. Half a unit of colour
+# is far below what an eye can see.
+SETTLED = 0.5
+
+# Colours are rounded to multiples of this before clustering.
 #
-# Splitting the *most spread out* box rather than the *biggest* box matters. A
-# large area of near-identical colour has almost no spread, so it is left alone
-# and stays one box holding a lot of pixels -- which is exactly what a dominant
-# colour is. Always splitting the biggest box would chop that region up and
-# leave every box roughly the same size.
+# The one concession to speed in the project, and it is needed: a 400px photo
+# holds around 115,000 distinct colours, and clustering that many points in plain
+# Python takes minutes. Rounding to multiples of 8 -- a step invisible to the eye
+# -- cuts it to about 6,600 and brings the whole thing down to roughly 175ms.
+CLUSTER_PRECISION = 8
 
 
-def widest_channel(box: List[RGB]) -> Tuple[int, int]:
+def distance_squared(first: RGB, second: RGB) -> int:
     """
-    Find which channel varies most inside a box.
+    How far apart two colours are, squared.
 
-    Returns ``(channel, spread)`` where channel is 0, 1 or 2 for red, green or
-    blue, and spread is the gap between the highest and lowest value found.
-    A spread of 0 means every pixel in the box is identical on every channel.
+    The square root is skipped on purpose. This is only used to ask "which is
+    nearer?", and whichever distance is smallest also has the smallest square, so
+    taking the root would be wasted work that changes no answer.
     """
-    best_channel = 0
-    best_spread = -1
-
-    for channel in range(3):
-        lowest = min(pixel[channel] for pixel in box)
-        highest = max(pixel[channel] for pixel in box)
-        spread = highest - lowest
-        if spread > best_spread:
-            best_spread = spread
-            best_channel = channel
-
-    return best_channel, best_spread
+    red = first[0] - second[0]
+    green = first[1] - second[1]
+    blue = first[2] - second[2]
+    return red * red + green * green + blue * blue
 
 
-def average_colour(box: List[RGB]) -> RGB:
+def nearest_centre(colour: RGB, centres: Sequence[RGB]) -> int:
+    """Return the position of whichever centre is closest to this colour."""
+    best_index = 0
+    best_distance = distance_squared(colour, centres[0])
+
+    for index in range(1, len(centres)):
+        distance = distance_squared(colour, centres[index])
+        if distance < best_distance:
+            best_index = index
+            best_distance = distance
+
+    return best_index
+
+
+def group_similar_colours(
+    pixels: List[RGB], precision: int = CLUSTER_PRECISION
+) -> Tuple[List[RGB], List[int]]:
     """
-    The average of every pixel in a box, one channel at a time.
+    Collapse near-identical colours together, keeping a count of each.
 
-    Identical to how the histogram averages a bucket: add up all the reds and
-    divide by the count, then the same for green and blue.
+    Clustering 6,000 weighted colours instead of 160,000 individual pixels is the
+    same calculation: the average of a group does not change when you say "this
+    colour, 500 times" rather than listing it 500 times.
+
+    Note what each group is *represented* by. Pixels are grouped by their rounded
+    colour, but each group reports the average of the **real** colours in it, not
+    the rounded value. Otherwise every answer would snap to a multiple of 8, and
+    an image of exactly (34, 148, 148) would come back as (32, 144, 144).
+
+    Returns ``(colours, weights)`` -- two lists of the same length.
     """
-    count = len(box)
-    return (
-        round(sum(pixel[0] for pixel in box) / count),
-        round(sum(pixel[1] for pixel in box) / count),
-        round(sum(pixel[2] for pixel in box) / count),
-    )
+    counts: Dict[RGB, int] = {}
+    channel_totals: Dict[RGB, List[int]] = {}
+
+    for pixel in pixels:
+        key = quantise_pixel(pixel, precision)
+
+        if key not in counts:
+            counts[key] = 0
+            channel_totals[key] = [0, 0, 0]
+
+        counts[key] += 1
+
+        # Three separate totals again -- red into red, green into green, blue
+        # into blue. They are never added to one another.
+        totals = channel_totals[key]
+        totals[0] += pixel[0]
+        totals[1] += pixel[1]
+        totals[2] += pixel[2]
+
+    colours, weights = [], []
+    # Sorted so the order does not depend on which pixel came first, which keeps
+    # the whole run reproducible.
+    for key in sorted(counts):
+        count = counts[key]
+        totals = channel_totals[key]
+        colours.append(
+            (round(totals[0] / count), round(totals[1] / count), round(totals[2] / count))
+        )
+        weights.append(count)
+
+    return colours, weights
 
 
-def split_box(box: List[RGB], at_median: bool = False) -> Tuple[List[RGB], List[RGB]]:
+def pick_starting_centres(
+    colours: List[RGB], weights: List[int], k: int, rng: random.Random
+) -> List[RGB]:
     """
-    Cut one box into two, along whichever channel is most spread out.
+    Choose k starting positions, spread out from one another. ("k-means++")
 
-    There are two sensible places to cut, and the choice matters a lot:
-
-    **Midpoint** (the default here) cuts at the middle *value* of the range.
-    If a box holds reds from 34 to 240, it cuts at 137.
-
-    **Median** cuts at the middle *pixel* -- sort the box and split it in half,
-    so both halves hold the same number of pixels. This is what the textbook
-    median cut algorithm does.
-
-    Median is the right choice when you want a balanced palette, which is what
-    the algorithm was designed for: every colour in the palette then represents
-    a similar share of the image.
-
-    It is the wrong choice here. We want the *dominant* colour, and cutting at
-    the median deliberately chops large uniform regions in half. On the blocks
-    demo -- 60% teal, 30% orange, 10% blue -- the median falls inside the run of
-    teal, so the teal block is split in two and the answer comes out as 50%
-    rather than 60%. Cutting at the midpoint of the range leaves the teal alone.
+    Dropping the centres at random risks two landing in the same neighbourhood,
+    squabbling over one group while another part of the image is ignored
+    entirely. So: pick the first at random, favouring colours many pixels share,
+    then pick each of the rest with a strong preference for colours far away from
+    every centre already placed.
     """
-    channel, _spread = widest_channel(box)
+    first = rng.choices(range(len(colours)), weights=weights, k=1)[0]
+    centres = [colours[first]]
 
-    if at_median:
-        ordered = sorted(box, key=lambda pixel: pixel[channel])
-        middle = len(ordered) // 2
-        return ordered[:middle], ordered[middle:]
+    while len(centres) < k:
+        # For each colour: how far is it from the nearest centre placed so far?
+        # Multiplied by its pixel count, so a distant colour used by one pixel
+        # does not outrank a fairly distant one used by thousands.
+        scores = [
+            min(distance_squared(colour, centre) for centre in centres) * weight
+            for colour, weight in zip(colours, weights)
+        ]
 
-    lowest = min(pixel[channel] for pixel in box)
-    highest = max(pixel[channel] for pixel in box)
-    threshold = (lowest + highest) / 2
+        if sum(scores) <= 0:
+            # Everything left already sits on a centre, so there is nothing
+            # meaningfully far away to choose. Any colour will do.
+            centres.append(colours[rng.randrange(len(colours))])
+        else:
+            centres.append(colours[rng.choices(range(len(colours)), weights=scores, k=1)[0]])
 
-    left = [pixel for pixel in box if pixel[channel] <= threshold]
-    right = [pixel for pixel in box if pixel[channel] > threshold]
-
-    # A box where every pixel sits on one side of its own midpoint cannot
-    # happen for a real range, but guard anyway rather than return an empty box.
-    if not left or not right:
-        ordered = sorted(box, key=lambda pixel: pixel[channel])
-        middle = len(ordered) // 2
-        return ordered[:middle], ordered[middle:]
-
-    return left, right
+    return centres
 
 
-def median_cut(
-    pixels: List[RGB],
-    box_count: int = 5,
-    record_steps: bool = False,
-    at_median: bool = False,
-) -> dict:
+def cluster_colours(pixels: List[RGB], k: int = 5, seed: int = DEFAULT_SEED) -> dict:
     """
-    Split the image's colours into ``box_count`` boxes, biggest first.
+    Group an image's pixels into k colour clusters, biggest first.
 
-    Args:
-        pixels: The image as (red, green, blue) triples.
-        box_count: How many boxes to end up with.
-        record_steps: Also return the state after every split, for the
-            animation. The algorithm itself does not need this.
-        at_median: Cut at the middle pixel rather than the middle value. See
-            :func:`split_box` -- textbook behaviour, but worse for finding a
-            dominant colour.
+    ``seed`` fixes the random starting positions so the same image always gives
+    the same answer. Without it, running twice would give two answers -- no use
+    in an API.
 
     Returns a dictionary:
 
-        results   the boxes, biggest first, same shape as count_colours
-        splits    how many cuts were made
-        steps     one entry per cut, if record_steps was set. Each holds the
-                  box colours and a colour -> box number lookup.
+        results     the clusters, biggest first, same shape as count_colours
+        iterations  how many rounds it took to settle
+        history     the centres after every round, starting with the seeds
+        colours     the distinct colours that were clustered
+        weights     how many pixels each of those represents
+
+    ``history`` is not needed by the algorithm. The animation replays it, so the
+    walkthrough shows the real run rather than a re-enactment of one.
     """
     if not pixels:
-        return {"results": [], "splits": 0, "steps": []}
+        return {"results": [], "iterations": 0, "history": [], "colours": [], "weights": []}
 
-    boxes: List[List[RGB]] = [list(pixels)]
-    steps: List[dict] = [_describe(boxes)] if record_steps else []
-    splits = 0
+    colours, weights = group_similar_colours(pixels)
 
-    while len(boxes) < box_count:
-        # Which box is worth cutting? The one whose colours are most spread
-        # out. Boxes holding a single pixel, or pixels that are all identical,
-        # cannot be cut at all.
-        best_index = -1
-        best_spread = 0
-        for index, box in enumerate(boxes):
-            if len(box) < 2:
+    # Asking for more groups than there are colours would leave some empty.
+    k = min(max(k, 1), len(colours))
+
+    rng = random.Random(seed)
+    centres = pick_starting_centres(colours, weights, k, rng)
+    history = [list(centres)]
+
+    iterations = 0
+    for iterations in range(1, MAX_ITERATIONS + 1):
+        # --- every colour joins its nearest centre -------------------------
+        members: List[List[int]] = [[] for _ in centres]
+        for index, colour in enumerate(colours):
+            members[nearest_centre(colour, centres)].append(index)
+
+        # --- every centre moves to the middle of its members ---------------
+        moved = []
+        furthest_move = 0.0
+
+        for centre_index, member_indexes in enumerate(members):
+            if not member_indexes:
+                # Nobody chose this centre. Leave it be; it usually picks up
+                # members on a later round.
+                moved.append(centres[centre_index])
                 continue
-            _channel, spread = widest_channel(box)
-            if spread > best_spread:
-                best_spread = spread
-                best_index = index
 
-        if best_index == -1:
-            # Every box is either a single pixel or entirely one colour. There
-            # is nothing left to cut, so we stop early with fewer boxes than
-            # asked for -- the image simply does not contain that many colours.
+            total_weight = sum(weights[i] for i in member_indexes)
+            average = tuple(
+                round(
+                    sum(colours[i][channel] * weights[i] for i in member_indexes)
+                    / total_weight
+                )
+                for channel in range(3)
+            )
+
+            furthest_move = max(
+                furthest_move, distance_squared(centres[centre_index], average) ** 0.5
+            )
+            moved.append(average)
+
+        centres = moved
+        history.append(list(centres))
+
+        # --- stop once nothing is really moving any more -------------------
+        if furthest_move < SETTLED:
             break
 
-        left, right = split_box(boxes[best_index], at_median=at_median)
-        boxes[best_index : best_index + 1] = [left, right]
-        splits += 1
+    # Count the members one final time, against the settled centres, so the
+    # numbers reported match the colours reported.
+    totals = [0] * len(centres)
+    for colour, weight in zip(colours, weights):
+        totals[nearest_centre(colour, centres)] += weight
 
-        if record_steps:
-            steps.append(_describe(boxes))
-
-    total = len(pixels)
     results = [
         {
-            "rgb": average_colour(box),
-            "bucket": average_colour(box),
-            "count": len(box),
-            "share": len(box) / total,
+            "rgb": centres[index],
+            "bucket": centres[index],
+            "count": totals[index],
+            "share": totals[index] / len(pixels),
         }
-        for box in boxes
-        if box
+        for index in range(len(centres))
+        if totals[index] > 0          # an empty cluster is not a colour
     ]
     # Biggest first, ties broken by colour so the order is reproducible.
     results.sort(key=lambda result: (-result["count"], result["rgb"]))
 
-    return {"results": results, "splits": splits, "steps": steps}
-
-
-def _describe(boxes: List[List[RGB]]) -> dict:
-    """
-    Snapshot the boxes for the animation.
-
-    Records each box's average colour, and a lookup saying which box every
-    colour ended up in, so the animation can colour each dot correctly.
-    Used only when ``record_steps`` is on -- the algorithm itself never needs it.
-    """
-    lookup: Dict[RGB, int] = {}
-    for index, box in enumerate(boxes):
-        for colour in box:
-            lookup[colour] = index
-
     return {
-        "colours": [average_colour(box) for box in boxes if box],
-        "lookup": lookup,
+        "results": results,
+        "iterations": iterations,
+        "history": history,
+        "colours": colours,
+        "weights": weights,
     }
 
 
