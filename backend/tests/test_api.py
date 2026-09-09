@@ -295,3 +295,18 @@ def test_unknown_method_is_rejected():
 
 def test_unknown_sample():
     assert client.post("/api/samples/nope/analyse").status_code == 404
+
+
+def test_median_cut_makes_enough_boxes_even_when_asked_for_one_colour():
+    """
+    Regression test.
+
+    For the histogram, top_n only decides how many results to show. For median
+    cut it decides how many times to cut, which changes the answer -- asking for
+    one box means nothing is ever cut, so the "dominant colour" came back as the
+    average of the whole image. On the blocks demo that was a muddy grey-green
+    rather than the teal that covers 60% of it.
+    """
+    result = analyse(KNOWN, method="mediancut", top_n=1, max_dimension=None)
+    assert result["dominant"]["rgb"] == [34, 148, 148]
+    assert result["dominant"]["percentage"] == pytest.approx(60.0, abs=0.5)

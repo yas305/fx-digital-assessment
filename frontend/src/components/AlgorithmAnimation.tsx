@@ -40,8 +40,8 @@ type StageKind =
   | "rank"
   | "refine"
   | "scatter"
-  | "iterate"
-  | "settled";
+  | "cut"
+  | "finished";
 
 interface Stage {
   kind: StageKind;
@@ -127,14 +127,14 @@ function buildStages(data: ExplainResponse): Stage[] {
       stages.push(
         iteration.isFirst
           ? {
-              kind: "iterate",
+              kind: "cut",
               iteration: index,
               title: "Put everything in one box",
               caption:
                 "Every pixel starts in a single box. Its colour is the average of the whole image, which is why it looks muddy — that is what we are about to fix.",
             }
           : {
-              kind: "iterate",
+              kind: "cut",
               iteration: index,
               title: `Cut ${iteration.step}`,
               caption: `Find whichever box has the widest spread of colour, and cut it in two at the middle of that range. ${
@@ -145,7 +145,7 @@ function buildStages(data: ExplainResponse): Stage[] {
     });
 
     stages.push({
-      kind: "settled",
+      kind: "finished",
       title: "The fullest box wins",
       caption: `Every pixel is in exactly one box, so the boxes account for the whole image between them. The fullest one is the dominant colour: ${data.dominant.hex}, ${data.dominant.percentage}% of the image.`,
     });
@@ -506,9 +506,9 @@ function layoutFor(
       return bucketLayout(rect, data, slotInBucket, hasOverflow, 0, true);
     case "scatter":
       return scatterLayout(rect, data, null);
-    case "iterate":
+    case "cut":
       return scatterLayout(rect, data, stage.iteration ?? 0);
-    case "settled":
+    case "finished":
       return scatterLayout(rect, data, data.iterations.length - 1, true);
     default:
       return { dots: [], markers: [], captions: [] };
@@ -681,7 +681,7 @@ function scatterLayout(
   rect: Rect,
   data: ExplainResponse,
   iterationIndex: number | null,
-  settled = false,
+  finished = false,
 ): Layout {
   // The plot uses the full rectangle rather than a centred square. The backend
   // already scales the two projected axes independently (see `_normalise` in
@@ -725,17 +725,17 @@ function scatterLayout(
     {
       x: rect.x + rect.width / 2,
       y: rect.y + rect.height - 6,
-      text: settled
+      text: finished
         ? `fullest box ${data.dominant.hex} · ${data.dominant.percentage}%`
         : iteration
           ? `${iteration.boxes.length} boxes · ${iteration.boxes
               .map((box) => `${Math.round(box.share * 100)}%`)
               .join(" · ")}`
           : "each dot is one pixel, positioned by its colour",
-      colour: settled ? BRIGHT : FAINT,
+      colour: finished ? BRIGHT : FAINT,
       align: "center",
       size: 12,
-      mono: settled || Boolean(iteration),
+      mono: finished || Boolean(iteration),
     },
   ];
 

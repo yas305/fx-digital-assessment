@@ -4,8 +4,11 @@ Command-line interface for the dominant colour finder.
 
 The brief asks for a program that takes an image file and prints the dominant
 colour, so that exists here as a first-class entry point rather than only as a
-web service. It shares every line of its analysis with the API, and imports
-nothing outside the standard library.
+web service.
+
+It runs the same analysis the web API does -- both call `analyse` in
+`app/report.py` -- but needs no web framework: the only third-party package
+involved is Pillow, and only to decode the image file.
 
 Usage:
     python cli.py photo.jpg
@@ -22,9 +25,15 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-from app.api import AnalysisError, analyse
-from app.colour import hex_to_rgb
-from app.dominant import ImageLoadError
+from bootstrap import use_the_right_python
+
+# Must happen before anything from `app` is imported, because that is what
+# needs the dependencies. Quiet, so it does not clutter the tool's output.
+use_the_right_python(str(Path(__file__).resolve()), needs=("PIL",), announce=False)
+
+from app.report import AnalysisError, analyse  # noqa: E402
+from app.colour import hex_to_rgb  # noqa: E402
+from app.dominant import ImageLoadError  # noqa: E402
 
 # Escape code that returns the terminal to its normal colours.
 RESET = "\033[0m"

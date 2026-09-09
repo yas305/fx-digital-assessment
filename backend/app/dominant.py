@@ -360,14 +360,20 @@ def count_colours(
 #
 #   1. Put every pixel in one big box.
 #   2. Look at that box: which of red, green or blue is most spread out?
-#   3. Sort the box by that channel and cut it in half at the middle pixel.
+#   3. Cut the box in two at the middle VALUE of that channel's range. If the
+#      reds in the box run 34 to 240, the cut is at 137: everything at or below
+#      goes in one box, everything above in the other.
 #   4. Find whichever box is now most spread out, and cut that one.
-#   5. Repeat until you have as many boxes as you asked for.
+#   5. Repeat until there are as many boxes as the caller asked for.
 #   6. Each box's average colour is one of the answers.
 #
+# Step 5 is worth being precise about: "as many as asked for" is a number passed
+# in, not something worked out here. The loop is `while len(boxes) < box_count`.
+# Each cut adds exactly one box, so reaching N boxes takes N-1 cuts.
+#
 # There is no randomness, nothing repeats until it settles, and the same image
-# always gives the same answer. It is the algorithm behind most "extract a
-# palette from this image" tools.
+# always gives the same answer. Textbook median cut splits at the middle PIXEL
+# rather than the middle value; see split_box for why this does not.
 #
 # Splitting the *most spread out* box rather than the *biggest* box matters. A
 # large area of near-identical colour has almost no spread, so it is left alone
@@ -450,8 +456,11 @@ def split_box(box: List[RGB], at_median: bool = False) -> Tuple[List[RGB], List[
     left = [pixel for pixel in box if pixel[channel] <= threshold]
     right = [pixel for pixel in box if pixel[channel] > threshold]
 
-    # A box where every pixel sits on one side of its own midpoint cannot
-    # happen for a real range, but guard anyway rather than return an empty box.
+    # With a real spread this cannot produce an empty side -- the lowest pixel is
+    # always at or below the midpoint and the highest is always above it. The
+    # guard is here for the degenerate case where every pixel in the box shares
+    # the same value on this channel, which median_cut already avoids by never
+    # cutting a box with zero spread.
     if not left or not right:
         ordered = sorted(box, key=lambda pixel: pixel[channel])
         middle = len(ordered) // 2
