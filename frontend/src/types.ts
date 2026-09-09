@@ -8,7 +8,7 @@
  * cannot drift apart.
  */
 
-export type Method = "histogram" | "kmeans";
+export type Method = "histogram" | "mediancut";
 
 export type RGB = [number, number, number];
 
@@ -115,7 +115,7 @@ export interface SampleImage {
  *
  * These describe the genuine intermediate state of a run -- a sample of real
  * pixels from the image, and either their bucket assignments or the full
- * history of the k-means centres.
+ * box colours after every cut.
  * ---------------------------------------------------------------------- */
 
 export interface ExplainPixel {
@@ -126,7 +126,7 @@ export interface ExplainPixel {
   quantisedHex: string | null;
   /** Where this pixel sits in the source image, normalised to 0-1. */
   imagePosition: [number, number];
-  /** Position in the 2D projection of colour space. k-means only. */
+  /** Position in the 2D projection of colour space. Median cut only. */
   colourPosition: [number, number] | null;
   /** Index into `buckets`, or -1 when the pixel falls outside the top N. */
   bucket: number;
@@ -143,21 +143,21 @@ export interface ExplainBucket {
   percentage: number;
 }
 
-export interface ExplainCentre {
+export interface ExplainBox {
   rgb: RGB;
   hex: string;
   position: [number, number];
-  /** This centre's place in the final size ranking. */
+  /** This box's place in the final size ranking. */
   rank: number;
   share: number;
 }
 
 export interface ExplainIteration {
   step: number;
-  /** True for the initial k-means++ seeding, which is chosen rather than computed. */
-  isSeed: boolean;
-  centres: ExplainCentre[];
-  /** Which centre each sampled pixel belonged to at this step. */
+  /** True for the very first step: one box, before any cut. */
+  isFirst: boolean;
+  boxes: ExplainBox[];
+  /** Which box each sampled pixel was in at this step. */
   assignments: number[];
 }
 
@@ -170,7 +170,7 @@ export interface ExplainResponse {
   distinctColours: number;
   pixels: ExplainPixel[];
   buckets: ExplainBucket[];
-  /** k-means steps. Empty for the histogram method. */
+  /** One entry per cut. Empty for the histogram method. */
   iterations: ExplainIteration[];
   dominant: ColourResult;
   image: ImageInfo;

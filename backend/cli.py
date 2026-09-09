@@ -4,12 +4,15 @@ Command-line interface for the dominant colour finder.
 
 The brief asks for a program that takes an image file and prints the dominant
 colour, so that exists here as a first-class entry point rather than only as a
-web service. It shares every line of its analysis with the API, and imports
-nothing outside the standard library.
+web service.
+
+It runs the same analysis the web API does -- both call `analyse` in
+`app/report.py` -- but needs no web framework: the only third-party package
+involved is Pillow, and only to decode the image file.
 
 Usage:
     python cli.py photo.jpg
-    python cli.py photo.jpg --top 5 --method kmeans
+    python cli.py photo.jpg --top 5 --method mediancut
     python cli.py product.jpg --ignore-white
     python cli.py photo.jpg --json
 """
@@ -22,9 +25,15 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-from app.api import AnalysisError, analyse
-from app.colour import hex_to_rgb
-from app.dominant import ImageLoadError
+from bootstrap import use_the_right_python
+
+# Must happen before anything from `app` is imported, because that is what
+# needs the dependencies. Quiet, so it does not clutter the tool's output.
+use_the_right_python(str(Path(__file__).resolve()), needs=("PIL",), announce=False)
+
+from app.report import AnalysisError, analyse  # noqa: E402
+from app.colour import hex_to_rgb  # noqa: E402
+from app.dominant import ImageLoadError  # noqa: E402
 
 # Escape code that returns the terminal to its normal colours.
 RESET = "\033[0m"
@@ -51,12 +60,12 @@ def build_parser() -> argparse.ArgumentParser:
             "Examples:\n"
             "  python cli.py photo.jpg\n"
             "  python cli.py photo.jpg --top 5\n"
-            "  python cli.py logo.png --method kmeans --top 5\n"
+            "  python cli.py logo.png --method mediancut --top 5\n"
             "  python cli.py product.jpg --ignore-white --json\n"
         ),
     )
     parser.add_argument("image", type=Path, help="Path to the image file.")
-    parser.add_argument("--method", choices=["histogram", "kmeans"], default="histogram",
+    parser.add_argument("--method", choices=["histogram", "mediancut"], default="histogram",
                         help="Counting strategy (default: histogram).")
     parser.add_argument("--top", type=int, default=1, metavar="N",
                         help="Return the top N colours instead of just one.")
@@ -110,7 +119,7 @@ def print_report(result: dict, bucket_size: int, show_palette: bool) -> None:
     print("  DETAIL")
     print(f"    method              {result['method']}")
     if stats["iterations"] is not None:
-        print(f"    k-means rounds      {stats['iterations']}")
+        print(f"    cuts made           {stats['iterations']}")
     else:
         print(f"    bucket size         {bucket_size}")
     print(f"    pixels counted      {result['filters']['pixelsCounted']:,} "

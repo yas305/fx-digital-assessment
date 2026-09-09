@@ -37,7 +37,7 @@ export default function StatsPanel({ result }: Props) {
         <Stat
           label="After grouping"
           figure={stats.distinctColours.toLocaleString()}
-          sub={method === "kmeans" ? "clusters found" : "occupied buckets"}
+          sub={method === "mediancut" ? "boxes made" : "occupied buckets"}
         />
         <Stat
           label="Pixels counted"
@@ -69,7 +69,7 @@ export default function StatsPanel({ result }: Props) {
         <Stat
           label="Time taken"
           figure={`${stats.durationMs.toFixed(1)} ms`}
-          sub={stats.iterations !== null ? `${stats.iterations} k-means iterations` : undefined}
+          sub={stats.iterations !== null ? `${stats.iterations} cuts made` : undefined}
         />
       </div>
 

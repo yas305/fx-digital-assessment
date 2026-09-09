@@ -93,13 +93,13 @@ def test_known_proportions_end_to_end():
 
 def test_both_methods_agree_on_an_obvious_image():
     histogram = analyse(KNOWN, method="histogram", max_dimension=None)
-    kmeans = analyse(KNOWN, method="kmeans", top_n=3, max_dimension=None)
-    assert histogram["dominant"]["rgb"] == kmeans["dominant"]["rgb"] == [34, 148, 148]
+    mediancut = analyse(KNOWN, method="mediancut", top_n=3, max_dimension=None)
+    assert histogram["dominant"]["rgb"] == mediancut["dominant"]["rgb"] == [34, 148, 148]
 
 
-def test_kmeans_clusters_cover_the_whole_image():
-    """The property that makes k-means the better answer on a colourful photo."""
-    result = analyse(KNOWN, method="kmeans", top_n=3, max_dimension=None)
+def test_mediancut_boxes_cover_the_whole_image():
+    """The property that makes median cut the better answer on a colourful photo."""
+    result = analyse(KNOWN, method="mediancut", top_n=3, max_dimension=None)
     assert sum(c["share"] for c in result["palette"]) == pytest.approx(1.0)
 
 
@@ -165,7 +165,7 @@ def test_samples_with_known_answers_return_them(sample):
 
 def test_explanation_agrees_with_the_analysis():
     """The walkthrough must not tell a different story from the result."""
-    for method in ("histogram", "kmeans"):
+    for method in ("histogram", "mediancut"):
         analysed = analyse(KNOWN, method=method, top_n=3, max_dimension=None)
         explained = explain(KNOWN, method=method, top_n=3, max_dimension=None)
         assert explained["dominant"]["rgb"] == analysed["dominant"]["rgb"]
@@ -201,23 +201,23 @@ def test_pixels_outside_the_top_n_are_marked_as_such():
     assert any(pixel["bucket"] == 0 for pixel in result["pixels"])
 
 
-def test_kmeans_records_seeds_then_rounds():
-    result = explain(KNOWN, method="kmeans", top_n=3, max_dimension=None)
+def test_mediancut_records_each_cut():
+    result = explain(KNOWN, method="mediancut", top_n=3, max_dimension=None)
     assert len(result["iterations"]) >= 2
-    assert result["iterations"][0]["isSeed"] is True
-    assert all(step["isSeed"] is False for step in result["iterations"][1:])
+    assert result["iterations"][0]["isFirst"] is True
+    assert all(step["isFirst"] is False for step in result["iterations"][1:])
 
 
-def test_kmeans_shares_add_up_at_every_step():
-    """Every pixel belongs to one cluster, at every point during the run."""
-    result = explain(KNOWN, method="kmeans", top_n=3, max_dimension=None)
+def test_mediancut_shares_add_up_at_every_step():
+    """Every pixel is in exactly one box, at every point during the run."""
+    result = explain(KNOWN, method="mediancut", top_n=3, max_dimension=None)
     for step in result["iterations"]:
-        assert sum(centre["share"] for centre in step["centres"]) == pytest.approx(1.0)
+        assert sum(centre["share"] for centre in step["boxes"]) == pytest.approx(1.0)
         assert len(step["assignments"]) == result["sampleSize"]
 
 
-def test_kmeans_positions_are_inside_the_plot():
-    result = explain(KNOWN, method="kmeans", top_n=3, max_dimension=None)
+def test_mediancut_positions_are_inside_the_plot():
+    result = explain(KNOWN, method="mediancut", top_n=3, max_dimension=None)
     for pixel in result["pixels"]:
         x, y = pixel["colourPosition"]
         assert 0.0 <= x <= 1.0 and 0.0 <= y <= 1.0
@@ -225,7 +225,7 @@ def test_kmeans_positions_are_inside_the_plot():
 
 def test_single_colour_image_does_not_break_the_plot():
     """A flat image has no spread to scale against; it must degrade, not crash."""
-    result = explain(encode(solid((90, 90, 90), 60, 60)), method="kmeans",
+    result = explain(encode(solid((90, 90, 90), 60, 60)), method="mediancut",
                      max_dimension=None)
     assert result["pixels"]
     assert all(pixel["colourPosition"] is not None for pixel in result["pixels"])
@@ -254,9 +254,9 @@ def test_analyse_sample_route():
 
 
 def test_explain_sample_route():
-    body = client.post("/api/samples/blocks/explain?method=kmeans&top_n=3").json()
+    body = client.post("/api/samples/blocks/explain?method=mediancut&top_n=3").json()
     assert body["sampleSize"] > 0
-    assert body["iterations"][0]["isSeed"] is True
+    assert body["iterations"][0]["isFirst"] is True
 
 
 def test_upload_route():
@@ -295,3 +295,18 @@ def test_unknown_method_is_rejected():
 
 def test_unknown_sample():
     assert client.post("/api/samples/nope/analyse").status_code == 404
+
+
+def test_median_cut_makes_enough_boxes_even_when_asked_for_one_colour():
+    """
+    Regression test.
+
+    For the histogram, top_n only decides how many results to show. For median
+    cut it decides how many times to cut, which changes the answer -- asking for
+    one box means nothing is ever cut, so the "dominant colour" came back as the
+    average of the whole image. On the blocks demo that was a muddy grey-green
+    rather than the teal that covers 60% of it.
+    """
+    result = analyse(KNOWN, method="mediancut", top_n=1, max_dimension=None)
+    assert result["dominant"]["rgb"] == [34, 148, 148]
+    assert result["dominant"]["percentage"] == pytest.approx(60.0, abs=0.5)

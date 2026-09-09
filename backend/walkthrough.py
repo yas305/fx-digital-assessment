@@ -14,11 +14,12 @@ from __future__ import annotations
 import sys
 
 from app.dominant import (
-    cluster_colours,
+    average_colour,
     count_colours,
-    distance_squared,
-    nearest_centre,
+    median_cut,
     quantise_pixel,
+    split_box,
+    widest_channel,
 )
 
 STEP_MODE = "--step" in sys.argv
@@ -185,214 +186,116 @@ pause()
 
 
 # ===========================================================================
-title("K-MEANS, PART 1 -- what we have and what we must produce")
+title("MEDIAN CUT, PART 1 -- the idea")
 # ===========================================================================
 print("""
-     WE HAVE:  the same six pixels, and a number k.
-""")
-for i, p in enumerate(PIXELS, 1):
-    out(f"pixel {i}: {p}")
-print("""
-     k = 2      we are asking for 2 groups
+     The histogram draws a grid over colour space BEFORE looking at the
+     image. Median cut draws its boundaries to FIT the image instead.
 
-     WE MUST PRODUCE:  2 colours, and how many pixels each represents.
+     The whole algorithm:
 
-     Those 2 colours are called CENTRES. A centre is just a colour -- three
-     numbers, exactly like a pixel. The difference is that a pixel comes
-     from the image, and a centre is something we calculate.
-""")
-pause()
+        1. Put every pixel in one big box.
+        2. Look at that box: which of red, green or blue is most spread out?
+        3. Cut the box in two at the middle of that range.
+        4. Find whichever box is now most spread out, and cut that one.
+        5. Repeat until you have as many boxes as you asked for.
+        6. Each box's average colour is one of the answers.
 
-
-# ===========================================================================
-title("K-MEANS, PART 2 -- where the first centres come from")
-# ===========================================================================
-print("""
-     We cannot calculate a centre yet. Calculating one means averaging the
-     pixels that belong to it, and nothing belongs to anything yet.
-
-     So we start by PICKING two of the actual pixels to BE the first
-     centres. Not inventing colours -- literally picking two out of the list.
-     That is what pick_starting_centres() does.
-
-     For this walkthrough we use:
-""")
-CENTRES_START = [(203, 12, 8), (15, 190, 20)]
-out(f"centre A = {CENTRES_START[0]}      (this is pixel 1)")
-out(f"centre B = {CENTRES_START[1]}     (this is pixel 6)")
-print("""
-     These are only a STARTING GUESS. They get replaced in Part 5.
+     No randomness. Nothing repeats until it settles. The same image always
+     gives the same answer.
 """)
 pause()
 
 
 # ===========================================================================
-title("K-MEANS, PART 3 -- the comparison: WHICH two colours, and why")
+title("MEDIAN CUT, PART 2 -- which channel is most spread out?")
 # ===========================================================================
-print("""
-     Now we decide, for EVERY pixel, whether it belongs to A or B. We
-     measure how different the pixel is from A, and from B, and pick
-     whichever is smaller.
-
-     So distance_squared() is ALWAYS called with:
-
-         argument 1 = the pixel we are currently looking at
-         argument 2 = one of the centres
-
-     It runs once per centre, for every pixel. Six pixels, two centres,
-     so twelve calls in total.
-""")
-code("red   = first[0] - second[0]",
-     "green = first[1] - second[1]",
-     "blue  = first[2] - second[2]",
-     "return red * red + green * green + blue * blue")
+code("for channel in range(3):",
+     "    lowest  = min(pixel[channel] for pixel in box)",
+     "    highest = max(pixel[channel] for pixel in box)",
+     "    spread  = highest - lowest")
 print()
-out("Here are the first two calls, both for PIXEL 1:")
-print()
-p = PIXELS[0]
-for name, centre in zip("AB", CENTRES_START):
-    out(f"distance_squared({p}, {centre})      <- pixel 1 vs centre {name}")
-    d = [p[i] - centre[i] for i in range(3)]
-    out(f"    red    {p[0]:>3} - {centre[0]:<3} = {d[0]:>5}   squared = {d[0]**2:>7,}")
-    out(f"    green  {p[1]:>3} - {centre[1]:<3} = {d[1]:>5}   squared = {d[1]**2:>7,}")
-    out(f"    blue   {p[2]:>3} - {centre[2]:<3} = {d[2]:>5}   squared = {d[2]**2:>7,}")
-    out(f"    added up                          = {distance_squared(p, centre):>7,}")
-    print()
-out(f"distance to A = {distance_squared(p, CENTRES_START[0]):>7,}")
-out(f"distance to B = {distance_squared(p, CENTRES_START[1]):>7,}")
-out(f"-> A is smaller, so pixel 1 belongs to centre A.")
-print("""
-     That comparison is all nearest_centre() does: run distance_squared
-     once per centre, return the position of the smallest.
-""")
-pause()
-
-
-# ===========================================================================
-title("K-MEANS, PART 4 -- do that for all six pixels")
-# ===========================================================================
-centres = list(CENTRES_START)
-print()
-out(f"{'pixel':<18} {'vs A':>12} {'vs B':>12}   belongs to")
-out("-" * 60)
-groups = [[], []]
-for p in PIXELS:
-    da, db = distance_squared(p, centres[0]), distance_squared(p, centres[1])
-    groups[nearest_centre(p, centres)].append(p)
-    out(f"{str(p):<18} {da:>12,} {db:>12,}   {'A' if da <= db else 'B'}")
-print()
-out(f"group A = {groups[0]}")
-out(f"group B = {groups[1]}")
-print("""
-     Every pixel now belongs to exactly one centre.
-""")
-pause()
-
-
-# ===========================================================================
-title("K-MEANS, PART 5 -- replace each centre with the average of its group")
-# ===========================================================================
-print("""
-     The starting centres were a guess. Now we know which pixels chose
-     each one, so we can calculate a better centre: the average of its
-     group -- worked out one channel at a time, exactly like the histogram.
-""")
-new_centres = []
-for name, group, old in zip("AB", groups, centres):
-    print()
-    out(f"CENTRE {name}   old value {old}")
-    out(f"   group: {group}")
-    out("")
-    avg = []
-    for ch, label in enumerate(("red  ", "green", "blue ")):
-        vals = [q[ch] for q in group]
-        s = sum(vals)
-        avg.append(round(s / len(vals)))
-        out(f"   {label}  {' + '.join(str(v) for v in vals)} = {s}"
-            f"   ->  {s} / {len(vals)} = {s/len(vals):.2f}  ->  {round(s/len(vals))}")
-    avg = tuple(avg)
-    new_centres.append(avg)
-    out("")
-    out(f"   new value {avg}   -- it changed by "
-        f"{distance_squared(old, avg) ** 0.5:.1f}")
-print("""
-     Look at centre B. Its old value was a GREEN, but its group holds two
-     blues and one green. Their average is a blue-green. So B changed a
-     lot -- the starting guess was bad, and the average corrects it.
-
-     Nothing "slides". The old number is thrown away and a new one
-     calculated. The change figure is only measured so we know when to stop.
-""")
-pause()
-
-
-# ===========================================================================
-title("K-MEANS, PART 6 -- decide whether to stop")
-# ===========================================================================
-furthest = max(distance_squared(o, n) ** 0.5 for o, n in zip(centres, new_centres))
-code("if furthest_move < SETTLED:      # SETTLED = 0.5",
-     "    break")
-print()
-out(f"largest change in Part 5 = {furthest:.1f}")
-out(f"{furthest:.1f} is bigger than 0.5, so we do NOT stop.")
-print("""
-     Why go round again? The centres sit somewhere different now, so a
-     pixel that was nearest to A before might be nearest to B now. If the
-     groups change, the averages change, so the centres must be
-     recalculated again.
-""")
-centres = new_centres
-pause()
-
-
-# ===========================================================================
-title("K-MEANS, PART 7 -- round 2, exactly the same two steps")
-# ===========================================================================
-print()
-out(f"centres are now:  A = {centres[0]}      B = {centres[1]}")
-print()
-out(f"{'pixel':<18} {'vs A':>12} {'vs B':>12}   belongs to")
-out("-" * 60)
-groups = [[], []]
-for p in PIXELS:
-    da, db = distance_squared(p, centres[0]), distance_squared(p, centres[1])
-    groups[nearest_centre(p, centres)].append(p)
-    out(f"{str(p):<18} {da:>12,} {db:>12,}   {'A' if da <= db else 'B'}")
-print()
-out(f"group A = {groups[0]}")
-out(f"group B = {groups[1]}")
+out("Starting box = all six pixels. Spread of each channel:")
 out("")
-out("THE SAME GROUPS AS ROUND 1. Nobody switched.")
+for channel, label in enumerate(("red  ", "green", "blue ")):
+    values = [p[channel] for p in PIXELS]
+    out(f"{label}   values {sorted(values)}")
+    out(f"{'':8}highest {max(values)} - lowest {min(values)} = spread {max(values)-min(values)}")
+ch, spread = widest_channel(PIXELS)
 print()
-final = []
-for name, group, old in zip("AB", groups, centres):
-    avg = tuple(round(sum(q[ch] for q in group) / len(group)) for ch in range(3))
-    final.append(avg)
-    out(f"centre {name}: average of the same group = {avg}   "
-        f"(was {old}, changed by {distance_squared(old, avg) ** 0.5:.1f})")
-furthest = max(distance_squared(o, n) ** 0.5 for o, n in zip(centres, final))
-print()
-out(f"largest change = {furthest:.1f}  ->  less than 0.5  ->  break. Finished.")
-print("""
-     That is what "converged" means: the same pixels chose the same
-     centres, so the averages came out identical, so nothing changed.
-     Going round again would produce the same result forever.
-""")
-centres = final
+out(f"widest is {['red','green','blue'][ch]}, with a spread of {spread}. That is where we cut.")
 pause()
 
 
 # ===========================================================================
-title("K-MEANS, PART 8 -- the answer")
+title("MEDIAN CUT, PART 3 -- make the cut")
 # ===========================================================================
-counts = [0, 0]
-for p in PIXELS:
-    counts[nearest_centre(p, centres)] += 1
+code("lowest    = min(pixel[channel] for pixel in box)",
+     "highest   = max(pixel[channel] for pixel in box)",
+     "threshold = (lowest + highest) / 2",
+     "",
+     "left  = [pixel for pixel in box if pixel[channel] <= threshold]",
+     "right = [pixel for pixel in box if pixel[channel] >  threshold]")
+lo = min(p[ch] for p in PIXELS)
+hi = max(p[ch] for p in PIXELS)
 print()
-for i in sorted(range(2), key=lambda x: -counts[x]):
-    out(f"{str(centres[i]):<18} {counts[i]} of 6 pixels   {counts[i]/6:>4.0%}")
+out(f"channel = {['red','green','blue'][ch]}, lowest {lo}, highest {hi}")
+out(f"threshold = ({lo} + {hi}) / 2 = {(lo+hi)/2}")
+out("")
+left, right = split_box(PIXELS)
+out(f"{'pixel':<18} {['red','green','blue'][ch]:<8} side")
+out("-" * 40)
+for p in PIXELS:
+    out(f"{str(p):<18} {p[ch]:<8} {'left' if p in left else 'right'}")
+print()
+out(f"left  box = {left}")
+out(f"right box = {right}")
 print("""
-     The dominant colour is the centre holding the most pixels.
+     Note we cut at the middle VALUE, not the middle PIXEL. Textbook median
+     cut sorts the box and splits it so both halves hold the same NUMBER of
+     pixels -- good for building a balanced palette, but wrong here: it would
+     chop a large area of one colour straight down the middle and report it
+     as two smaller groups.
+""")
+pause()
+
+
+# ===========================================================================
+title("MEDIAN CUT, PART 4 -- repeat on whichever box is now most spread out")
+# ===========================================================================
+run = median_cut(PIXELS, box_count=3, record_steps=True)
+print()
+for i, step in enumerate(run["steps"]):
+    label = "start" if i == 0 else f"after cut {i}"
+    out(f"{label:<14} {len(step['colours'])} box(es):  "
+        + "   ".join(str(c) for c in step["colours"]))
+print("""
+     Each line is one cut. The boxes get smaller and their average colours
+     get sharper -- the first box is a muddy average of the whole image,
+     because it contains everything.
+""")
+pause()
+
+
+# ===========================================================================
+title("MEDIAN CUT, PART 5 -- the answer")
+# ===========================================================================
+code("return (",
+     "    round(sum(pixel[0] for pixel in box) / count),",
+     "    round(sum(pixel[1] for pixel in box) / count),",
+     "    round(sum(pixel[2] for pixel in box) / count),",
+     ")")
+print()
+out("Each box's average colour, exactly like the histogram averages a bucket:")
+out("")
+for r in run["results"]:
+    out(f"{str(r['rgb']):<18} {r['count']} of 6 pixels   {r['share']:>4.0%}")
+print(f"""
+     Cuts made: {run['splits']}
+
+     Every pixel is in exactly one box, so the shares add to 100%. That is
+     the property the histogram does not have -- its top few buckets might
+     cover only a small slice of the image.
 """)
 pause()
 
@@ -401,39 +304,18 @@ pause()
 title("BOTH METHODS, SAME SIX PIXELS")
 # ===========================================================================
 hist, _ = count_colours(PIXELS, bucket_size=BUCKET, top_n=3)
-km3 = cluster_colours(PIXELS, k=3)["results"]
+mc = median_cut(PIXELS, box_count=3)["results"]
 print()
-out("With k = 3, the two methods agree EXACTLY:")
+out("With 3 boxes, the two methods agree EXACTLY:")
 out("")
-out(f"{'HISTOGRAM':<34} {'K-MEANS (k=3)'}")
+out(f"{'HISTOGRAM':<34} {'MEDIAN CUT (3 boxes)'}")
 out("-" * 74)
 for i in range(3):
     out(f"{str(hist[i]['rgb']):<18} {hist[i]['share']:>5.0%}"
-        f"{'':<11}{str(km3[i]['rgb']):<18} {km3[i]['share']:>5.0%}")
+        f"{'':<11}{str(mc[i]['rgb']):<18} {mc[i]['share']:>5.0%}")
 print("""
      Identical. Two completely different routes to the same answer, because
      this image has three obvious groups and both methods found them.
-""")
-pause()
-
-km2 = cluster_colours(PIXELS, k=2)["results"]
-print()
-out("Now the same thing with k = 2 -- and it goes wrong:")
-out("")
-for c in km2:
-    out(f"{str(c['rgb']):<18} {c['count']} pixels  {c['share']:>5.0%}")
-print(f"""
-     Only two groups were allowed, so the lone green pixel had nowhere to
-     go and joined the two blues. Their average is {km2[0]['rgb'] if km2[0]['rgb'][2] > 100 else km2[1]['rgb']} -- a
-     blue-green that NO PIXEL IN THE IMAGE ACTUALLY IS.
-
-     Worse, both groups now hold 3 pixels each: a 50/50 tie. The winner is
-     decided by the tie-break rule (lowest colour value first), not by the
-     image. So "the dominant colour" here is essentially arbitrary.
-
-     THAT is the cost of choosing k badly, and it is the honest weakness of
-     k-means: you must pick k before you know how many groups exist. The
-     histogram found three groups without being told how many to look for.
 """)
 pause()
 
@@ -450,17 +332,19 @@ print("""
        - the grid lines are fixed before seeing the image, so a smoothly
          shaded object gets sliced across several groups that then compete
 
-     K-MEANS
-       Drop k centres. Every pixel joins its nearest. Each centre is then
-       recomputed as the average of whoever joined -- the position with the
-       smallest total distance to them. Repeat until nothing moves.
+     MEDIAN CUT
+       Put every pixel in one box. Repeatedly find the box with the widest
+       spread of colour and cut it in two at the middle of that range.
+       Each box's average is one of the answers.
 
-       + boundaries land where the image's colours actually are
-       + the k groups always cover 100% of the pixels
-       - you must choose k in advance, and choosing badly invents a colour
-         that is not in the image
+       + boundaries are drawn to fit the image, not decided in advance
+       + the boxes always cover 100% of the pixels
+       + no randomness, so the same image always gives the same answer
+       - you must choose how many boxes up front
+       - boxes are cut along one channel at a time, so the groups are
+         always rectangular blocks rather than natural shapes
 
      THE ONE-LINE DIFFERENCE
        histogram  drops pixels into boxes drawn BEFORE seeing the image
-       k-means    moves centres to wherever the image's colours actually are
+       median cut cuts boxes to fit wherever the image's colours actually are
 """)

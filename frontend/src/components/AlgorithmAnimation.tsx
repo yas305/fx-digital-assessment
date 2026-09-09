@@ -10,7 +10,7 @@ interface Props {
  * Animated walkthrough of the counting algorithm.
  *
  * Every dot on screen is a real pixel sampled from the image being analysed, and
- * for k-means every centre position is one the algorithm genuinely visited. The
+ * for median cut every box colour is one the algorithm genuinely produced. The
  * backend returns its own intermediate state (see `app/explain.py`) rather than
  * this component re-deriving it, so the animation cannot show one thing while
  * the analyser does another.
@@ -40,14 +40,14 @@ type StageKind =
   | "rank"
   | "refine"
   | "scatter"
-  | "iterate"
-  | "settled";
+  | "cut"
+  | "finished";
 
 interface Stage {
   kind: StageKind;
   title: string;
   caption: string;
-  /** Index into `data.iterations`, for the k-means steps. */
+  /** Index into `data.iterations`, for the median-cut steps. */
   iteration?: number;
 }
 
@@ -108,7 +108,7 @@ function buildStages(data: ExplainResponse): Stage[] {
   const pixels = data.sampleSize.toLocaleString();
   const total = data.totalPixels.toLocaleString();
 
-  if (data.method === "kmeans") {
+  if (data.method === "mediancut") {
     const stages: Stage[] = [
       {
         kind: "image",
@@ -119,33 +119,35 @@ function buildStages(data: ExplainResponse): Stage[] {
         kind: "scatter",
         title: "Plot them in colour space",
         caption:
-          "Each pixel becomes a point positioned by its colour, so similar colours sit near each other. This is a 2D projection of a 3D space, chosen to preserve as much of the spread as possible.",
+          "Each pixel becomes a point positioned by its colour, so similar colours sit near each other. This is a flat view of a 3D space, drawn against whichever two channels vary most in this image.",
       },
     ];
 
     data.iterations.forEach((iteration, index) => {
       stages.push(
-        iteration.isSeed
+        iteration.isFirst
           ? {
-              kind: "iterate",
+              kind: "cut",
               iteration: index,
-              title: "Place the starting centres",
-              caption: `${iteration.centres.length} centres are seeded far apart from each other, weighted by how many pixels sit nearby. Spreading them out avoids the poor results a purely random start can give.`,
+              title: "Put everything in one box",
+              caption:
+                "Every pixel starts in a single box. Its colour is the average of the whole image, which is why it looks muddy — that is what we are about to fix.",
             }
           : {
-              kind: "iterate",
+              kind: "cut",
               iteration: index,
-              title: `Iteration ${iteration.step}`,
-              caption:
-                "Every pixel joins its nearest centre, then each centre moves to the average of its members. Repeat until nothing moves.",
+              title: `Cut ${iteration.step}`,
+              caption: `Find whichever box has the widest spread of colour, and cut it in two at the middle of that range. ${
+                iteration.boxes.length
+              } boxes now. No randomness and nothing repeats until it settles — each cut is decided by the colours themselves.`,
             },
       );
     });
 
     stages.push({
-      kind: "settled",
-      title: "The largest cluster wins",
-      caption: `The centres have settled. The biggest group of pixels is the dominant colour: ${data.dominant.hex}, ${data.dominant.percentage}% of the image.`,
+      kind: "finished",
+      title: "The fullest box wins",
+      caption: `Every pixel is in exactly one box, so the boxes account for the whole image between them. The fullest one is the dominant colour: ${data.dominant.hex}, ${data.dominant.percentage}% of the image.`,
     });
     return stages;
   }
@@ -428,9 +430,9 @@ function render(
     context.fill();
   }
 
-  // Centres are matched by rank rather than index, because a centre's position
-  // in the array is arbitrary while its rank is stable across iterations. That
-  // is what makes a centre appear to *move* between steps instead of teleporting.
+  // Boxes are matched by rank rather than index, because a box's position in
+  // the array is arbitrary while its rank (biggest first) is stable. That keeps
+  // the animation's colours consistent with the palette shown beside it.
   const ranks = new Set([
     ...from.markers.map((marker) => marker.rank),
     ...to.markers.map((marker) => marker.rank),
@@ -449,10 +451,10 @@ function render(
     const y = lerp(a.y, b.y, t);
     const rgb = mixRgb(a.rgb, b.rgb, t);
 
-    // The fill is semi-transparent so the cluster's own pixels stay visible
+    // The fill is semi-transparent so the box's own pixels stay visible
     // underneath it. A solid disc hides exactly the data the marker is there to
     // describe -- most obviously on an image of a few flat colours, where every
-    // pixel in a cluster lands on the same point and vanishes beneath it.
+    // pixel in a box lands on the same point and vanishes beneath it.
     context.beginPath();
     context.arc(x, y, 11, 0, Math.PI * 2);
     context.fillStyle = css(rgb, 0.55 * alpha);
@@ -504,9 +506,9 @@ function layoutFor(
       return bucketLayout(rect, data, slotInBucket, hasOverflow, 0, true);
     case "scatter":
       return scatterLayout(rect, data, null);
-    case "iterate":
+    case "cut":
       return scatterLayout(rect, data, stage.iteration ?? 0);
-    case "settled":
+    case "finished":
       return scatterLayout(rect, data, data.iterations.length - 1, true);
     default:
       return { dots: [], markers: [], captions: [] };
@@ -674,18 +676,18 @@ function bucketLayout(
   return { dots, markers: [], captions };
 }
 
-/** Pixels positioned by colour, with the k-means centres drawn among them. */
+/** Pixels positioned by colour, with each box's average drawn among them. */
 function scatterLayout(
   rect: Rect,
   data: ExplainResponse,
   iterationIndex: number | null,
-  settled = false,
+  finished = false,
 ): Layout {
   // The plot uses the full rectangle rather than a centred square. The backend
   // already scales the two projected axes independently (see `_normalise` in
   // app/explain.py), so the picture is not metric in either case -- and a square
   // plot inside a wide canvas throws away most of the width, squeezing the
-  // clusters into a narrow band where nothing can be made out.
+  // boxes into a narrow band where nothing can be made out.
   const plotWidth = rect.width;
   const plotHeight = rect.height - LABEL_BAND;
   const left = rect.x;
@@ -696,26 +698,26 @@ function scatterLayout(
 
   const dots: Dot[] = data.pixels.map((pixel, index) => {
     const position = pixel.colourPosition ?? [0.5, 0.5];
-    const cluster = iteration?.assignments[index];
-    const centre =
-      cluster !== undefined ? iteration?.centres[cluster] : undefined;
+    const boxIndex = iteration?.assignments[index];
+    const box =
+      boxIndex !== undefined ? iteration?.boxes[boxIndex] : undefined;
 
     return {
       x: left + position[0] * plotWidth,
       y: top + (1 - position[1]) * plotHeight,
-      // Once centres exist, each pixel takes its cluster's colour. That recolour
-      // *is* what "assign to nearest centre" looks like.
-      rgb: centre ? centre.rgb : pixel.rgb,
-      alpha: centre ? 0.75 : 0.9,
+      // Once the boxes exist, each pixel takes its box's colour. That recolour
+      // *is* what "this pixel is in that box" looks like.
+      rgb: box ? box.rgb : pixel.rgb,
+      alpha: box ? 0.75 : 0.9,
       size: DOT_RADIUS,
     };
   });
 
-  const markers: Marker[] = (iteration?.centres ?? []).map((centre) => ({
-    x: left + centre.position[0] * plotWidth,
-    y: top + (1 - centre.position[1]) * plotHeight,
-    rgb: centre.rgb,
-    rank: centre.rank,
+  const markers: Marker[] = (iteration?.boxes ?? []).map((box) => ({
+    x: left + box.position[0] * plotWidth,
+    y: top + (1 - box.position[1]) * plotHeight,
+    rgb: box.rgb,
+    rank: box.rank,
     alpha: 1,
   }));
 
@@ -723,17 +725,17 @@ function scatterLayout(
     {
       x: rect.x + rect.width / 2,
       y: rect.y + rect.height - 6,
-      text: settled
-        ? `largest cluster ${data.dominant.hex} · ${data.dominant.percentage}%`
+      text: finished
+        ? `fullest box ${data.dominant.hex} · ${data.dominant.percentage}%`
         : iteration
-          ? `${iteration.centres.length} centres · ${iteration.centres
-              .map((centre) => `${Math.round(centre.share * 100)}%`)
+          ? `${iteration.boxes.length} boxes · ${iteration.boxes
+              .map((box) => `${Math.round(box.share * 100)}%`)
               .join(" · ")}`
           : "each dot is one pixel, positioned by its colour",
-      colour: settled ? BRIGHT : FAINT,
+      colour: finished ? BRIGHT : FAINT,
       align: "center",
       size: 12,
-      mono: settled || Boolean(iteration),
+      mono: finished || Boolean(iteration),
     },
   ];
 

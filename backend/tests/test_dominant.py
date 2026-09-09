@@ -1,5 +1,5 @@
 """
-Tests for the algorithm itself: loading, filtering, counting and clustering.
+Tests for the algorithm itself: loading, filtering, counting and cutting.
 
 The valuable tests here are the ones built on images with a *known* answer --
 exact proportions, a colour hidden under transparency. Asserting against a real
@@ -16,14 +16,15 @@ from PIL import Image, ImageDraw
 from app.dominant import (
     ImageLoadError,
     apply_filters,
-    cluster_colours,
+    average_colour,
     count_colours,
     distance_squared,
-    group_similar_colours,
     load_image,
-    nearest_centre,
+    median_cut,
     quantise_pixel,
     sample_pixels,
+    split_box,
+    widest_channel,
 )
 from tests.helpers import bands, encode, solid
 
@@ -119,16 +120,17 @@ def test_bucket_boundaries_can_split_a_colour():
     the grid line falls at 208, so 200-207 land in one bucket and 208-209 in the
     next. The group splits 80/20 instead of pooling all 100 votes.
 
-    This is inherent to any fixed grid, and is the main reason k-means exists
-    alongside it: clustering places its boundaries where the data is sparse.
+    This is inherent to any fixed grid, and is the main reason median cut
+    exists alongside it: it draws its boundaries to fit the image rather than
+    at fixed positions decided before the image was seen.
     """
     blues = [(100, 150, 200 + offset) for offset in range(10) for _ in range(10)]
 
     results, _ = count_colours(blues, bucket_size=16, top_n=2)
     assert [r["count"] for r in results] == [80, 20]
 
-    # k-means is not bound by the grid, so it keeps all 100 together.
-    assert cluster_colours(blues, k=1)["results"][0]["count"] == 100
+    # Median cut is not bound by the grid, so it keeps all 100 together.
+    assert median_cut(blues, box_count=1)["results"][0]["count"] == 100
 
 
 def test_reported_colour_is_the_true_average_not_the_bucket_label():
@@ -167,78 +169,101 @@ def test_counting_nothing():
     assert count_colours([], 16, 3) == ([], 0)
 
 
-# --------------------------------------------------------------------- k-means
+# ----------------------------------------------------------------- median cut
 
 def test_distance_squared_examples():
     assert distance_squared((0, 0, 0), (0, 0, 0)) == 0
     assert distance_squared((3, 0, 0), (0, 4, 0)) == 25          # 3^2 + 4^2
 
 
-def test_nearest_centre_picks_the_closest():
-    centres = [(255, 0, 0), (0, 255, 0), (0, 0, 255)]
-    assert nearest_centre((250, 10, 10), centres) == 0
-    assert nearest_centre((10, 10, 250), centres) == 2
+def test_widest_channel_finds_the_most_varied():
+    box = [(10, 100, 50), (20, 200, 55)]     # red spans 10, green 100, blue 5
+    channel, spread = widest_channel(box)
+    assert channel == 1 and spread == 100
 
 
-def test_grouping_keeps_the_true_colour_not_the_rounded_one():
+def test_average_colour_averages_each_channel_separately():
+    assert average_colour([(10, 20, 30), (20, 40, 60)]) == (15, 30, 45)
+
+
+def test_split_cuts_along_the_widest_channel():
+    box = [(0, 10, 5), (10, 10, 5), (250, 10, 5)]     # only red varies
+    left, right = split_box(box)
+    assert left == [(0, 10, 5), (10, 10, 5)]          # both below the midpoint
+    assert right == [(250, 10, 5)]
+
+
+def test_midpoint_split_leaves_uniform_regions_alone():
     """
-    Rounding decides what gets grouped, never what gets reported.
+    The reason we cut at the middle VALUE, not the middle PIXEL.
 
-    Representing each group by its rounded value would snap every answer to a
-    multiple of the precision, so (34, 148, 148) would come back (32, 144, 144).
+    Textbook median cut splits so both halves hold the same number of pixels,
+    which is right for building a balanced palette but wrong for finding a
+    dominant colour: it chops a large uniform region straight down the middle.
     """
-    colours, weights = group_similar_colours([(34, 148, 148)] * 10, precision=8)
-    assert colours == [(34, 148, 148)]
-    assert weights == [10]
+    pixels = [(34, 148, 148)] * 60 + [(240, 140, 30)] * 30 + [(44, 96, 200)] * 10
+
+    midpoint = median_cut(pixels, box_count=3)["results"]
+    assert midpoint[0]["rgb"] == (34, 148, 148)
+    assert midpoint[0]["share"] == pytest.approx(0.6)
+
+    # The same data cut at the median splits the teal block in half.
+    at_median = median_cut(pixels, box_count=3, at_median=True)["results"]
+    assert at_median[0]["share"] < 0.6
 
 
 def test_finds_obviously_separate_groups():
     pixels = [(220, 40, 40)] * 50 + [(40, 60, 200)] * 30 + [(40, 200, 60)] * 20
-    run = cluster_colours(pixels, k=3)
+    run = median_cut(pixels, box_count=3)
     assert [r["count"] for r in run["results"]] == [50, 30, 20]
     assert run["results"][0]["rgb"] == (220, 40, 40)
 
 
-def test_clusters_cover_every_pixel():
+def test_boxes_cover_every_pixel():
     """
-    Every pixel belongs to exactly one cluster, so the shares total 1.
+    Every pixel is in exactly one box, so the shares total 1.
 
-    This is the property that makes k-means useful on a colourful photograph,
-    where the histogram's top few buckets might cover only a few percent of it.
+    This is the property that makes it useful on a colourful photograph, where
+    the histogram's top few buckets might cover only a few percent of it.
     """
     rng = random.Random(2)
     pixels = [(rng.randrange(256), rng.randrange(256), rng.randrange(256))
               for _ in range(3000)]
-    run = cluster_colours(pixels, k=6)
+    run = median_cut(pixels, box_count=6)
     assert sum(r["share"] for r in run["results"]) == pytest.approx(1.0)
     assert sum(r["count"] for r in run["results"]) == 3000
 
 
 def test_is_deterministic():
-    """A fixed seed must give the same answer every run."""
+    """No randomness anywhere, so the same image always gives the same answer."""
     rng = random.Random(8)
     pixels = [(rng.randrange(256), rng.randrange(256), rng.randrange(256))
               for _ in range(2000)]
-    first = cluster_colours(pixels, k=4)["results"]
-    second = cluster_colours(pixels, k=4)["results"]
+    first = median_cut(pixels, box_count=4)["results"]
+    second = median_cut(pixels, box_count=4)["results"]
     assert [(r["rgb"], r["count"]) for r in first] == [(r["rgb"], r["count"]) for r in second]
 
 
-def test_clamps_k_to_the_colours_available():
-    run = cluster_colours([(90, 90, 90)] * 40, k=8)
-    assert len(run["results"]) == 1 and run["results"][0]["count"] == 40
+def test_stops_early_when_there_is_nothing_left_to_cut():
+    """An image of one flat colour cannot be split, however many boxes we ask for."""
+    run = median_cut([(90, 90, 90)] * 40, box_count=8)
+    assert len(run["results"]) == 1
+    assert run["results"][0]["count"] == 40
+    assert run["splits"] == 0
 
 
-def test_stops_once_the_centres_settle():
-    run = cluster_colours([(220, 40, 40)] * 50 + [(40, 60, 200)] * 50, k=2)
-    assert run["iterations"] < 10
-    # The history records every round, starting with the seeds.
-    assert len(run["history"]) == run["iterations"] + 1
+def test_records_a_step_per_cut_for_the_animation():
+    pixels = [(220, 40, 40)] * 50 + [(40, 60, 200)] * 30 + [(40, 200, 60)] * 20
+    run = median_cut(pixels, box_count=3, record_steps=True)
+    # One entry for the starting box, then one per cut.
+    assert len(run["steps"]) == run["splits"] + 1
+    assert len(run["steps"][0]["colours"]) == 1
+    assert len(run["steps"][-1]["colours"]) == 3
 
 
-def test_clustering_nothing():
-    run = cluster_colours([], k=3)
-    assert run["results"] == [] and run["iterations"] == 0
+def test_cutting_nothing():
+    run = median_cut([], box_count=3)
+    assert run["results"] == [] and run["splits"] == 0
 
 
 # --------------------------------------------------------------------- filters
