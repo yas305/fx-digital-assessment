@@ -62,7 +62,7 @@ The analysis also runs standalone, with no server involved (from `backend/`):
 ```
 
 ```bash
-./.venv/bin/python cli.py photo.jpg --top 5 --method kmeans
+./.venv/bin/python cli.py photo.jpg --top 5 --method mediancut
 ```
 
 ```bash
@@ -78,7 +78,7 @@ swatches beside the values.
 cd backend && ./.venv/bin/python -m pytest
 ```
 
-70 tests covering the counting logic, both methods, the filters, image loading
+72 tests covering the counting logic, both methods, the filters, image loading
 edge cases, end-to-end analysis, the animation data and the HTTP routes.
 
 ---
@@ -126,55 +126,60 @@ look identical can straddle a boundary and split their votes.
 split 80/20 at a bucket size of 16, because the grid line falls at 208. This is
 why the second method exists.
 
-### Method two — k-means clustering
+### Method two — median cut
 
-Picture ice-cream vans parking in a town. Park k vans, every resident walks to
-their nearest one, each van moves to the middle of its own customers, and some
-residents now find a different van is nearer — so repeat. Eventually nothing
-moves. The town is colour space, the residents are pixels, the vans are cluster
-centres, and the busiest van is the dominant colour.
+The histogram's grid lines are decided before anyone looks at the image. Median
+cut draws its boundaries to fit the image instead:
 
-The difference from the histogram is **where the boundaries fall**. The histogram
-draws them on a fixed grid decided before anyone looked at the image, so a
-smoothly shaded object gets sliced into pieces that then compete against each
-other. k-means puts its boundaries wherever colours are sparse, so a shaded
-object stays in one group.
+1. Put every pixel in **one big box**.
+2. Look at that box — which of red, green or blue is **most spread out**?
+3. **Cut the box in two** at the middle of that range.
+4. Find whichever box is now most spread out, and cut that one.
+5. Repeat until you have as many boxes as you asked for.
+6. Each box's **average colour** is one of the answers.
 
-Three choices in it are deliberate:
+No randomness, nothing repeats until it settles, and the same image always gives
+the same answer. It is the family of algorithm behind most "extract a palette
+from this image" tools.
 
-- **k-means++ seeding.** Dropping centres at random risks two landing in the same
-  neighbourhood, squabbling over one group while another part of the image is
-  ignored. Each centre after the first is chosen with a preference for colours
-  far from those already placed.
-- **A fixed random seed.** Textbook k-means returns a slightly different answer
-  every run, which is no use in an API — run it twice, get two answers, look
-  broken.
-- **Rounding to multiples of 8 before clustering.** A 400px photograph holds
-  around 115,000 distinct colours, and clustering that many points in plain
-  Python takes minutes; rounding first cuts it to about 6,600. Crucially the
-  rounding decides only what gets *grouped*, never what gets *reported* — each
-  group is represented by the average of its real colours, so an image of exactly
-  `(34, 148, 148)` still returns exactly that.
+Two choices in it are deliberate:
+
+**Split the most *spread out* box, not the *biggest* box.** A large area of
+near-identical colour has almost no spread, so it is left alone and stays one box
+holding a lot of pixels — which is exactly what a dominant colour is. Always
+splitting the biggest box would chop that region up and leave every box roughly
+the same size.
+
+**Cut at the middle *value*, not the middle *pixel*.** This is a deliberate
+departure from the textbook algorithm, and it matters. Classic median cut sorts
+the box and splits it so both halves hold the same *number* of pixels — ideal for
+building a balanced palette, which is what it was designed for. It is wrong here:
+on the `blocks` demo (60% teal, 30% orange, 10% blue) the median falls inside the
+run of teal, so the teal block gets split in half and the answer comes out as
+**50%** instead of 60%. Cutting at the midpoint of the range leaves it intact.
+`test_midpoint_split_leaves_uniform_regions_alone` pins both behaviours, and the
+`at_median` flag lets you run the textbook version to see the difference.
 
 ### Comparing the two
 
 They answer different questions, and on a colourful photograph they disagree
 sharply:
 
-| | Histogram | k-means |
+| | Histogram | Median cut |
 |---|---|---|
-| The question | "Which single shade appears most often?" | "If I had to describe this image with k colours, which k?" |
-| Boundaries | A fixed grid | Found from the data |
-| You must choose | bucket size | k |
-| Coverage | The top 6 might be 5% of the image | The k clusters always cover 100% |
-| Speed | One pass | Repeats until settled |
+| The question | "Which single shade appears most often?" | "If I had to describe this image with a few colours, which few?" |
+| Boundaries | A fixed grid, decided in advance | Cut to fit the image |
+| You must choose | bucket size | how many boxes |
+| Coverage | The top 6 might be 5% of the image | The boxes always cover 100% |
+| Speed | One pass | One pass per cut |
+| Randomness | none | none |
 
 That coverage row is the important one. On a photograph of forty macarons the
 histogram reports a dominant colour worth **1.2%**, because the yellow macarons
 alone are sliced by shading into dozens of adjacent buckets that each compete
-separately. k-means merges them and reports that same yellow at **22%**. Neither
-is wrong; the histogram is answering a question that photograph does not have a
-good answer to.
+separately. Median cut keeps them together, because its boundaries land where the
+colours are sparse rather than at fixed intervals. Neither is wrong; the histogram
+is answering a question that photograph does not have a good answer to.
 
 On the `blocks` demo image — flat colours, no shading — both give identical
 answers, because there is no ramp for the grid to slice.
@@ -185,7 +190,7 @@ The **How it works** tab animates the algorithm over whatever image is loaded.
 
 It is not an illustration drawn to resemble the algorithm. The backend returns
 its genuine intermediate state — a sample of several hundred real pixels, and
-either their bucket assignments or the complete history of the k-means centres —
+either their bucket assignments or the box colours after every cut —
 and the frontend replays it. `test_explanation_agrees_with_the_analysis` asserts
 the two cannot disagree.
 
@@ -197,9 +202,9 @@ Some detail worth knowing:
   renderer interpolates between consecutive layouts. Nothing is stored
   mid-transition, so resizing or skipping between steps cannot leave it
   inconsistent.
-- **Centres are matched between frames by rank, not array index.** A centre's
-  index is arbitrary; its rank is stable. That is what makes a centre appear to
-  *move* between iterations rather than teleport.
+- **Boxes are matched between frames by rank, not array index.** A box's index
+  in the list is arbitrary; its rank (biggest first) is stable, which keeps the
+  animation's colours consistent with the palette shown beside it.
 - **Auto-advance pauses when the tab is hidden.** Timers keep firing in a
   background tab but `requestAnimationFrame` does not, so without this the steps
   would march on invisibly.
@@ -238,7 +243,7 @@ The full pipeline on a 400×400 photograph with 115,000 distinct colours:
 | | Time |
 |---|---|
 | Histogram, top 6 | ~190 ms |
-| k-means, k = 6 | ~300 ms |
+| Median cut, 6 boxes | ~250 ms |
 
 Pillow remains, because decoding a JPEG is not something to write by hand. It is
 used only to turn a file into a list of pixels; every calculation after that is
@@ -293,13 +298,13 @@ first. Without that the same image could give different answers on different run
 ```
 backend/
   app/
-    dominant.py   The algorithm: loading, filtering, counting, clustering, sampling
+    dominant.py   The algorithm: loading, filtering, counting, cutting, sampling
     colour.py     Colour conversions and naming
     samples.py    Demo images, drawn in code
     api.py        Response building and HTTP routes
   main.py         Starts the API:  python main.py
   cli.py          Standalone command-line entry point
-  tests/          70 tests
+  tests/          72 tests
 frontend/
   src/
     App.tsx       State, debouncing, request cancellation
@@ -320,12 +325,12 @@ HTTP or JSON. Delete `api.py` and the command line still works.
 - **The TypeScript types are hand-maintained.** FastAPI publishes an OpenAPI
   schema at `/openapi.json`; on a longer-lived project these would be generated
   from it so the two cannot drift apart.
-- **Clustering happens in RGB space, not a perceptual one.** CIELAB is engineered
+- **Splitting happens in RGB space, not a perceptual one.** CIELAB is engineered
   so equal numeric distance matches equal perceived difference, which would make
-  clusters align better with what a person would group. The HSV filtering already
+  the boxes align better with what a person would group. The HSV filtering already
   covers the most visible symptom.
-- **`k` must be chosen in advance.** Mean-shift clustering finds the number of
-  groups on its own, at a significant cost in speed.
+- **The number of boxes must be chosen in advance.** Mean-shift clustering
+  finds the number of groups on its own, at a significant cost in speed.
 - **The animation's colour-space scatter is not metric.** The two axes are scaled
   independently so the plot fills the canvas, which stretches the picture: it
   shows *which* points group together, not how far apart they truly are.

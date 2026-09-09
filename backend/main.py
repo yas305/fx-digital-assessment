@@ -21,40 +21,9 @@ import os
 import sys
 from pathlib import Path
 
+from bootstrap import use_the_right_python
+
 HERE = Path(__file__).resolve().parent
-
-# Where a virtual environment keeps its interpreter. The path differs on
-# Windows, so check both rather than assuming.
-VENV_PYTHON = next(
-    (
-        candidate
-        for candidate in (HERE / ".venv" / "bin" / "python",
-                          HERE / ".venv" / "Scripts" / "python.exe")
-        if candidate.exists()
-    ),
-    None,
-)
-
-
-def dependencies_are_installed() -> bool:
-    """True if the packages the server needs can be imported."""
-    try:
-        import fastapi  # noqa: F401
-        import PIL      # noqa: F401
-        import uvicorn  # noqa: F401
-    except ImportError:
-        return False
-    return True
-
-
-def explain_how_to_install() -> None:
-    """Print setup instructions, for when there is no environment to fall back on."""
-    print("The backend's dependencies are not installed.\n", file=sys.stderr)
-    print("Set them up with:\n", file=sys.stderr)
-    print("    python3 -m venv .venv", file=sys.stderr)
-    print("    .venv/bin/pip install -r requirements.txt\n", file=sys.stderr)
-    print("Then run this again:\n", file=sys.stderr)
-    print("    python main.py", file=sys.stderr)
 
 
 def main() -> int:
@@ -67,24 +36,16 @@ def main() -> int:
                         help="Do not restart the server when a file changes.")
     args = parser.parse_args()
 
-    if not dependencies_are_installed():
-        if VENV_PYTHON is None:
-            explain_how_to_install()
-            return 1
-
-        # Re-run this same script with the virtual environment's Python. execv
-        # replaces the current process rather than nesting one inside another,
-        # so Ctrl-C still stops the server cleanly.
-        print(f"Using the virtual environment at {VENV_PYTHON.parent.parent}")
-        # execv replaces this process immediately and does not flush buffered
-        # output on the way out, so the line above would be lost without this.
-        sys.stdout.flush()
-        os.execv(str(VENV_PYTHON), [str(VENV_PYTHON), str(Path(__file__).resolve()), *sys.argv[1:]])
+    # The server needs more than the command-line tool does.
+    use_the_right_python(
+        str(Path(__file__).resolve()), needs=("PIL", "fastapi", "uvicorn")
+    )
 
     import uvicorn
 
-    # Run from this folder so that "app.api" resolves however the script was
-    # invoked -- `python main.py` or `python backend/main.py` both work.
+    # uvicorn's reloader starts a fresh process that imports "app.api" by name,
+    # and that process resolves it relative to the working directory. Moving
+    # here first means `python main.py` and `python backend/main.py` both work.
     os.chdir(HERE)
 
     print()
